@@ -1,0 +1,10 @@
+services:
+  scraper:
+    build: .
+    image: instagram-scraper:latest
+    init: true
+    shm_size: "1gb"
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./output:/app/output
+      - ./data:/app/data
