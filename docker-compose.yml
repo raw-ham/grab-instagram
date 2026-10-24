@@ -1,9 +1,50 @@
 services:
+  # One-off CLI runs:  docker compose run --rm scraper -k gym -n 5
   scraper:
     build: .
     image: instagram-scraper:latest
     init: true
     shm_size: "1gb"
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./output:/app/output
+      - ./data:/app/data
+
+  # Long-running REST API:  docker compose up -d server
+  # Then: curl "http://localhost:8000/search?keyword=gym&limit=5&type=reels"
+  server:
+    build: .
+    image: instagram-scraper:latest
+    init: true
+    shm_size: "1gb"
+    restart: unless-stopped
+    entrypoint: ["uvicorn", "grab_in_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      # 8000 on this machine belongs to another project, so the API is published
+      # on 8001. Override with HOST_PORT=9000 docker compose up -d server
+      - "${HOST_PORT:-8001}:8000"
+    environment:
+      MAX_LIMIT: "25"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./output:/app/output
+      - ./data:/app/data
+
+  # Tests:  docker compose run --rm tests
+  # Kept behind a profile so plain "docker compose up" never starts it.
+  tests:
+    build: .
+    image: instagram-scraper:latest
+    entrypoint: ["pytest"]
+    command: ["-q", "test_server.py"]
+    profiles: ["test"]
     volumes:
       - ./credentials.json:/app/credentials.json:ro
       - ./output:/app/output

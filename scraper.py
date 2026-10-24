@@ -68,7 +68,8 @@ SEARCH_INPUT_SELECTORS = [
     (By.CSS_SELECTOR, 'input[type="text"]'),
 ]
 POST_LINK_SELECTOR = 'a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]'
-POST_URL_RE = re.compile(r'^https://www\.instagram\.com/(p|reel|tv)/([A-Za-z0-9_-]+)')
+SHORTCODE_RE = re.compile(r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)')
+CANONICAL_RE = re.compile(r'instagram\.com/(p|reel|tv)/([A-Za-z0-9_-]+)')
 BLOCK_URL_MARKERS = ('/challenge/', '/two_factor/', '/accounts/login', '/accounts/suspended')
 TYPE_MATCH = {'posts': {'p'}, 'reels': {'reel'}, 'both': {'p', 'reel', 'tv'}}
 
@@ -85,8 +86,7 @@ def load_settings():
     parser.add_argument('-k', '--keyword', help='keyword to search in the search menu')
     parser.add_argument('-n', '--limit', type=int, help='number of links to return')
     parser.add_argument('--type', dest='result_type', choices=sorted(TYPE_MATCH),
-                        help='posts, reels or both (the keyword page lists reel '
-                             'links only when Instagram returns them)')
+                        help='reels, posts or both (reels are listed first)')
     parser.add_argument('--credentials', default=str(CREDENTIALS_FILE),
                         help='path to the credentials JSON file')
     parser.add_argument('--login-only', action='store_true',
@@ -504,16 +504,33 @@ def open_search_results(driver, keyword):
             log('Submitted the search box with Enter.')
             time.sleep(6)
 
+    target = f'{SEARCH_URL}keyword/?q={quote(keyword)}'
+    for attempt in range(3):
+        if 'explore/search/keyword' in driver.current_url:
+            break
+        log(f'Opening the keyword results page for the typed search '
+            f'(attempt {attempt + 1}/3)...')
+        safe_get(driver, target, settle=5 + 3 * attempt)
+
     if 'explore/search/keyword' not in driver.current_url:
-        log('Opening the keyword results page for the typed search.')
-        safe_get(driver, f'{SEARCH_URL}keyword/?q={quote(keyword)}', settle=5)
+        snapshot(driver, 'keyword_page_missing')
+        raise RuntimeError(
+            f'Could not open the keyword results page for "{keyword}"; the browser '
+            f'ended up on {driver.current_url}. See '
+            'output/debug/keyword_page_missing.png.'
+        )
 
     log(f'Search results page: {driver.current_url}')
 
 
-def collect_links(driver, keyword, limit, result_type, max_scrolls=20):
-    wanted = TYPE_MATCH[result_type]
-    links, seen = [], set()
+def collect_candidates(driver, needed, max_scrolls=20):
+    """Scroll the keyword results grid and collect post shortcodes.
+
+    Every cell in that grid is served as a /p/ link even when the media is
+    really a reel, so candidates are gathered unfiltered here and their true
+    type is decided afterwards by watch_reel().
+    """
+    codes, seen = [], set()
     stalls = 0
 
     for scroll in range(max_scrolls):
@@ -522,33 +539,88 @@ def collect_links(driver, keyword, limit, result_type, max_scrolls=20):
                 href = element.get_attribute('href') or ''
             except StaleElementReferenceException:
                 continue
-            match = POST_URL_RE.match(href)
+            match = SHORTCODE_RE.search(href)
             if not match:
                 continue
-            kind, shortcode = match.group(1), match.group(2)
-            if kind not in wanted:
-                continue
-            canonical = f'https://www.instagram.com/{kind}/{shortcode}/'
-            if canonical not in seen:
-                seen.add(canonical)
-                links.append(canonical)
-                if len(links) >= limit:
-                    return links
-        log(f'  scroll {scroll + 1}: {len(links)} link(s) collected')
-        before = len(links)
+            code = match.group(1)
+            if code not in seen:
+                seen.add(code)
+                codes.append(code)
+                if len(codes) >= needed:
+                    return codes
+        log(f'  scroll {scroll + 1}: {len(codes)} candidate(s)')
+        before = len(codes)
         driver.execute_script('window.scrollTo(0, document.body.scrollHeight);')
         time.sleep(2.5)
-        if len(links) == before:
+        if len(codes) == before:
             stalls += 1
             for _ in range(2):
                 driver.execute_script('window.scrollBy(0, 1200);')
                 time.sleep(1.2)
             if stalls >= 4:
-                log('  no new links after several scrolls; stopping.')
+                log('  no new candidates after several scrolls; stopping.')
                 break
         else:
             stalls = 0
-    return links
+    return codes
+
+
+def watch_reel(driver, code):
+    """Open a grid item and read its canonical URL to see what it really is.
+
+    The grid href always says /p/ - even for reels - so the page is opened and
+    its canonical link is what distinguishes a reel from a plain post.
+    Returns (kind, url), or (None, None) when the page cannot be read.
+    """
+    safe_get(driver, f'https://www.instagram.com/p/{code}/', settle=3)
+    assert_not_blocked(driver, 'reel check')
+    canonical = driver.execute_script(
+        "var l = document.querySelector('link[rel=canonical]');"
+        "return l ? l.href : '';"
+    ) or ''
+    match = CANONICAL_RE.search(canonical)
+    if not match:
+        return None, None
+    kind, canonical_code = match.group(1), match.group(2)
+    return kind, f'https://www.instagram.com/{kind}/{canonical_code}/'
+
+
+def collect_links(driver, keyword, limit, result_type):
+    """Collect links, opening every grid item to classify it as reel or post.
+
+    Reels are always listed first, so a "both" run prioritises them.
+    """
+    wanted = TYPE_MATCH[result_type]
+    candidates = collect_candidates(driver, max(limit * 3, 12))
+    if not candidates:
+        log('  the results grid was empty; reloading the page once and retrying...')
+        safe_get(driver, driver.current_url, settle=6)
+        candidates = collect_candidates(driver, max(limit * 3, 12))
+    log(f'  {len(candidates)} candidate(s); opening each to classify reel vs post...')
+
+    reels, posts = [], []
+    for index, code in enumerate(candidates, start=1):
+        if result_type == 'posts':
+            if len(posts) >= limit:
+                break
+        elif len(reels) >= limit:
+            break
+
+        kind, url = watch_reel(driver, code)
+        if kind is None:
+            log(f'  [{index}/{len(candidates)}] {code}: unreadable, skipped')
+            continue
+        if kind not in wanted:
+            log(f'  [{index}/{len(candidates)}] {code}: {kind}, filtered out')
+            continue
+        if kind == 'reel':
+            reels.append(url)
+            log(f'  [{index}/{len(candidates)}] {code}: reel ({len(reels)}/{limit})')
+        else:
+            posts.append(url)
+            log(f'  [{index}/{len(candidates)}] {code}: post')
+
+    return (reels + posts)[:limit]
 
 
 def search(driver, keyword, limit, result_type):
