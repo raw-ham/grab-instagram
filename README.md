@@ -5,7 +5,6 @@ This project implements a high-performance data extraction and analysis pipeline
 ## Pipeline Architecture
 
 ![Social Media Monitoring Node Graph](node_graph.png)
-*(Attach the node graph screenshot as `node_graph.png` in the root directory to display here)*
 
 The system follows a multi-stage workflow:
 1.  **Workflow Trigger**: Initiates parallel extraction from multiple sources.
