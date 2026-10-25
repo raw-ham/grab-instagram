@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY scraper.py .
 COPY grab_in_server.py .
 COPY test_server.py .
+COPY reddit_scraper.py .
+COPY test_reddit.py .
 RUN mkdir -p /app/output/debug /app/data
 
 # Default command is the CLI scraper; the compose "server" service overrides this

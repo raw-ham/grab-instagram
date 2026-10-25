@@ -37,13 +37,35 @@ services:
       - ./output:/app/output
       - ./data:/app/data
 
+  # Reddit REST API:  docker compose up -d reddit
+  # Port comes from .env (REDDIT_PORT, default 8002), published on localhost only.
+  # Then: curl "http://localhost:8002/search?keyword=python&n=3&m=5&sorttype=hot"
+  reddit:
+    build: .
+    image: instagram-scraper:latest
+    init: true
+    restart: unless-stopped
+    entrypoint: ["uvicorn", "reddit_scraper:app", "--host", "0.0.0.0",
+                 "--port", "${REDDIT_PORT:-8002}"]
+    env_file: .env
+    ports:
+      - "127.0.0.1:${REDDIT_PORT:-8002}:${REDDIT_PORT:-8002}"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${REDDIT_PORT:-8002}/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   # Tests:  docker compose run --rm tests
   # Kept behind a profile so plain "docker compose up" never starts it.
   tests:
     build: .
     image: instagram-scraper:latest
     entrypoint: ["pytest"]
-    command: ["-q", "test_server.py"]
+    command: ["-q", "test_server.py", "test_reddit.py"]
+    env_file: .env
     profiles: ["test"]
     volumes:
       - ./credentials.json:/app/credentials.json:ro
